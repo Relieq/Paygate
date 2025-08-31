@@ -1,6 +1,6 @@
-package com.example.taskhub.controller;
+package com.example.paygate.controller;
 
-import com.example.taskhub.service.TimeService;
+import com.example.paygate.service.TimeService;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;

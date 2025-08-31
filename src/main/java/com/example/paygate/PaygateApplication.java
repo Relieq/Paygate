@@ -1,11 +1,11 @@
-package com.example.taskhub;
+package com.example.paygate;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 
 @SpringBootApplication
-public class TaskhubApplication {
+public class PaygateApplication {
     public static void main(String[] args) {
-        SpringApplication.run(TaskhubApplication.class, args);
+        SpringApplication.run(PaygateApplication.class, args);
     }
 }

@@ -1,10 +1,10 @@
-package com.example.taskhub;
+package com.example.paygate;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 
 @SpringBootTest
-class TaskhubApplicationTests {
+class PaygateApplicationTests {
 
     @Test
     void contextLoads() {

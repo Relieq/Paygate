@@ -5,16 +5,23 @@ Nó cung cấp một loạt các tính năng và công cụ để phát triển 
 
 ---
 
-Trong quá trình học tập, Taskhub là dự án "xương sống" tôi làm xuyên suốt để áp dụng các kiến thức về Spring Boot.
+Trong quá trình học tập, Paygate là dự án "xương sống" tôi làm xuyên suốt để áp dụng các kiến thức về Spring Boot.
 Trong README này, tôi sẽ trình bày nội dung theo từng tuần mà tôi học được.
 
-TaskHub – API quản lý công việc cá nhân
+**Dự án xương sống: PayGate Lite**
 
-Tính năng: đăng ký/đăng nhập (JWT), CRUD task, gán nhãn, lọc/paginate, tệp đính kèm (tuỳ chọn), audit log, metrics/health, Docker compose (app+db+redis).
+API mô phỏng một gateway thẻ cơ bản (học thuật, không dùng sản xuất).
+* Luồng chính: register -> login -> process payment -> refund/ void.
+* Thực hành bảo mật: OAuth2 Resource Server (JWT).
+* Tính đúng đắn: tiền tệ chính xác, chống lặp giao dịch, audit trail, quy trình hoàn tác.
+* Monitering: logs chuẩn hoá, metrics, tracing.
+* DB: MySQL, JPA/Hibernate.
 
 ---
 
-# Bài 1: “Hello Spring Boot”
+# Bài 1: “Hello Spring Boot” 
+(Bài này ban đầu làm bên project khác, giờ gom vào đây cho đủ bộ)
+
 Bài này tôi làm quen với Spring Boot, tạo project, cấu hình Maven, chạy ứng dụng và tạo endpoint đơn giản.
 
 Ở bài này, tôi tìm hiểu được một số điểm như dưới đây.
@@ -218,7 +225,7 @@ public class HelloController {
 - Tiêm TimeService vào HealthController và trả JSON { "status":"ok", "timeMs": <now> }.
 
 ## Auto Configuration
-Spring Boot có 1 cái đặc trưng goọi là Auto Configuration, nó sẽ tự động cấu hình các thành phần dựa trên các thư viện có trong classpath.
+Spring Boot có 1 cái đặc trưng gọi là Auto Configuration, nó sẽ tự động cấu hình các thành phần dựa trên các thư viện có trong classpath.
 Quá trình này giúp giảm thiểu cấu hình thủ công và làm cho việc phát triển ứng dụng nhanh hơn. Nó diễn ra như sau:
 
 Khi bạn chạy app (class @SpringBootApplication), có 3 chuyện quan trọng xảy ra:
@@ -231,3 +238,5 @@ Ví dụ: WebMvcAutoConfiguration, JacksonAutoConfiguration, DataSourceAutoConfi
 - ComponentScan: quét các lớp trong package hiện tại và các package con để tìm các bean 
 được đánh dấu với @Component, @Service, @Repository, @Controller, ...
 - Configuration: đánh dấu lớp hiện tại là một lớp cấu hình, có thể định nghĩa các bean.
+
+---

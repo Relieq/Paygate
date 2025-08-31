@@ -1,4 +1,4 @@
-package com.example.taskhub.service;
+package com.example.paygate.service;
 
 import org.springframework.stereotype.Service;
 
