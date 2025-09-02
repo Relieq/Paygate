@@ -14,8 +14,9 @@ API mô phỏng một gateway thẻ cơ bản (học thuật, không dùng sản
 * Luồng chính: register -> login -> process payment -> refund/ void.
 * Thực hành bảo mật: OAuth2 Resource Server (JWT).
 * Tính đúng đắn: tiền tệ chính xác, chống lặp giao dịch, audit trail, quy trình hoàn tác.
-* Monitering: logs chuẩn hoá, metrics, tracing.
+* Monitering: Grafana và Prometheus.
 * DB: MySQL, JPA/Hibernate.
+* Unit test và Stress test.
 
 ---
 
@@ -238,5 +239,285 @@ Ví dụ: WebMvcAutoConfiguration, JacksonAutoConfiguration, DataSourceAutoConfi
 - ComponentScan: quét các lớp trong package hiện tại và các package con để tìm các bean 
 được đánh dấu với @Component, @Service, @Repository, @Controller, ...
 - Configuration: đánh dấu lớp hiện tại là một lớp cấu hình, có thể định nghĩa các bean.
+
+---
+Giới thiệu qua về các công nghệ dùng trong PayGate Lite:
+1. Spring Web (Spring MVC): xây dựng API RESTful.
+2. Spring Data JPA + Hibernate: tương tác với cơ sở dữ liệu (MySQL).
+3. Spring Security: bảo mật API với OAuth2 Resource Server (JWT).
+4. Spring Boot Actuator: giám sát và quản lý ứng dụng.
+5. Prometheus & Grafana: giám sát hiệu suất và trực quan hoá dữ liệu.
+6. Maven: quản lý dự án và phụ thuộc.
+
+## Một số khái niệm quan trọng
+* REST (Representational State Transfer): kiến trúc xây dựng API qua HTTP.
+    - Hành động (action): động từ (GET, POST, PUT, DELETE).
+    - Stateless: server không lưu trạng thái client (mỗi request có đầy đủ thông tin).
+
+      Xác thực stateless (không trạng thái) là phương pháp xác minh danh tính người dùng mà máy chủ không lưu trữ bất kỳ thông
+      tin phiên (trạng thái) nào của người dùng giữa các yêu cầu. Thay vào đó, thông tin cần thiết, bao gồm cả thông tin xác
+      thực, được đóng gói và lưu trữ ở phía máy khách dưới dạng mã thông báo (token), ví dụ như JSON Web Tokens (JWT). Khi máy
+      khách gửi yêu cầu, nó đính kèm mã thông báo này, và máy chủ chỉ cần xác minh chữ ký mật mã của mã thông báo để chứng minh tính hợp lệ.
+
+* JWT (JSON Web Token): chuỗi đã ký (HS256/RS256) chứa claims (sub, roles, exp…), cho phép xác thực stateless.
+
+    Luồng: register → login (trả token) → client gửi Authorization: Bearer <token> → filter verify → set user vào SecurityContext.
+
+    Lưu ý: hạn dùng ngắn (exp), secret/keys an toàn, câu chuyện revoke/refresh (demo có thể bỏ qua revoke).
+
+* Hibernate JPA: ORM ánh xạ class ↔ bảng (annotation @Entity, @Id, @OneToMany…), dùng JpaRepository để CRUD, truy vấn, transaction. Tránh double cho tiền; dùng long amountMinor.
+
+* Prometheus: hệ time-series “kéo” (pull) số đo từ /actuator/prometheus.
+
+    Metric kiểu Counter (đếm), Gauge (trạng thái), Timer/Histogram (độ trễ).
+
+* Grafana: vẽ dashboard từ dữ liệu Prometheus (biểu đồ QPS, p95 latency, lỗi, CPU/heap). Bạn chỉ cấu hình data source Prometheus và import dashboard mẫu Spring Boot.
+
+* Unit test: kiểm thử một đơn vị nhỏ (method/service/controller) bằng JUnit5 + Mockito/MockMvc.
+
+    Ví dụ: test JwtService.issue/verify, test AuthController.login trả 200/401.
+
+* Stress test: bắn tải để đo thông lượng/độ trễ và tìm bottleneck.
+
+    Dùng k6 (script JS gọn) hoặc JMeter. Kịch bản: đăng nhập lấy JWT → bắn POST /v1/payments 100 RPS → 10% refund → đo p95, error<1%.
+
+---
+# Bài 2: MySQL + JPA (Spring boot JPA) + Register (chưa triển khai JWT)
+
+**Mục tiêu**
+- Kết nối MySQL.
+- Nắm 3 mảnh ghép JPA: Entity, Repository, Service.
+- Làm endpoint POST /v1/auth/register: lưu user (hash password bằng BCrypt).
+
+**Khái niệm**
+- @Entity: ánh xạ class ↔ bảng.
+- Repository: interface extends JpaRepository<T, ID>.
+- Service: class @Service, chứa logic nghiệp vụ (check trùng mail, hassh pass).
+- BCrypt: hàm băm mật khẩu an toàn, luôn lưu hash, không lưu plaintext (mã gốc).
+
+**Bước làm**
+1) Thêm dependency cần thiết:
+
+    spring-boot-starter-web, spring-boot-starter-validation, spring-boot-starter-data-jpa, mysql-connector-j,
+spring-boot-starter-security (để dùng BCryptPasswordEncoder, chưa bật chặn), spring boot-starter-test (test).
+
+2) Cấu hình kết nối MySQL trong application.properties:
+```properties
+spring.datasource.url=jdbc:mysql://localhost:3306/paygate?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+spring.datasource.username=YOUR_USER
+spring.datasource.password=YOUR_PASS
+spring.jpa.hibernate.ddl-auto=update
+spring.jpa.open-in-view=false
+```
+`Dev dùng ddl-auto=update cho nhanh. Sau sẽ chuyển sang Flyway + validate.`
+
+---
+Bây giờ tôi sẽ đề cập một chút đến cấu trúc package trong dự án này để thuận tiện về sau.
+
+```
+com.example.paygate
+├─ controller
+├─ service
+├─ repository
+├─ entity
+├─ dto
+├─ security
+└─ config
+```
+
+---
+3) Tạo Entity User
+- Field: id (Long, @Id, @GeneratedValue), email (String, unique), passwordHash (String), roles ("MERCHANT" hoặc "ADMIN,MERCHANT"), 
+createdAt (Instant).
+
+```java
+@Entity @Table(name="users")
+public class User {
+    @Id @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(nullable = false, unique = true)
+    private String email;
+
+    @Column(nullable = false)
+    private String passwordHash;
+
+    @Column(nullable = false)
+    private String role; // "MERCHANT" or "ADMIN, MERCHANT".
+
+    @Column(nullable = false)
+    private Instant createdAt = Instant.now();
+
+    // Constructor, getters, setters (hoặc dùng Lombok @Data)
+}
+```
+
+4) Tạo Repository
+
+Khi bạn viết:
+```java
+public interface UserRepository extends JpaRepository<User, Long> {
+    Optional<User> findByEmail(String email);
+}
+```
+
+Spring Data JPA sẽ tự sinh implementation (runtime proxy) và đăng ký thành bean.
+
+Bạn không phải tự tạo class triển khai. Muốn dùng chỉ việc thêm @Autowired hoặc tiêm qua constructor.
+
+Điều kiện: package repository phải nằm dưới gốc com.example.paygate để Boot tự bật @EnableJpaRepositories.
+
+Khi nào mới cần code implementation?
+
+Khi bạn muốn query đặc thù khó: dùng @Query("..."), hoặc tạo cặp UserRepositoryCustom + UserRepositoryImpl. Cái này để sau.
+
+5) Tạo PasswordEncoder (BCrypt)
+
+Tạo lớp @Configuration là SecurityBeans:
+```java
+@Configuration(proxyBeanMethods = false)
+public class SecurityBeans {
+    @Bean
+    PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder();
+        // Tham số strength của encoder trên (work factor - quyết định số lần hash 2^strength) mặc định là 10, có thể tăng 12 cho production (test chậm hơn).
+    }
+}
+```
+
+6) DTO + Controller cho Register
+
+**DTO** (tôi đặt trong package dto.auth):
+* Request:
+```java
+public record RegisterRequest(
+        @Email @NotBlank String email,
+        @NotBlank String password
+) {}
+```
+
+* Response:
+```java
+public record AuthResponse(Long userId) {}
+```
+
+**Controller**
+```java
+@RestController
+@RequestMapping("/v1/auth")
+public class AuthController {
+    private final AuthService authService;
+
+    public AuthController(AuthService authService) {
+        this.authService = authService;
+    }
+
+    @PostMapping("/register")
+    @ResponseStatus(HttpStatus.CREATED)
+    public AuthReponse register(@Valid @RequestBody RegisterRequest req) {
+        return authService.register(req);
+    }
+}
+```
+
+_Vì sao nó (encoder) tự tiêm được?_
+
+Bạn có:
+
+* SecurityBeans là @Configuration với một @Bean PasswordEncoder passwordEncoder().
+* AuthService là @Service có đúng 1 constructor nhận PasswordEncoder.
+
+Khi khởi tạo AuthService, Spring nhìn vào constructor duy nhất và cố gắng “ghép phụ thuộc theo kiểu (by type)”.
+
+Trong ApplicationContext đang có đúng 1 bean kiểu PasswordEncoder ⇒ Spring tiêm thẳng vào, không cần @Autowired.
+
+Quy tắc ngắn gọn: Có một constructor duy nhất ⇒ @Autowired là tùy chọn.
+
+Nếu có nhiều constructor, bạn mới cần đánh dấu constructor nào để tiêm bằng @Autowired.
+
+**Service**
+```java
+@Service
+@Transactional
+public class AuthService {
+    private final UserRepository users;
+    private final PasswordEncoder encoder; // <-- bean từ SecurityBeans
+
+    public AuthService(UserRepository users, PasswordEncoder encoder) {
+        this.users = users;
+        this.encoder = encoder;
+    }
+
+    public AuthReponse register(RegisterRequest req) {
+        // Check mail trùng lặp
+        if (users.findByEmail(req.email()).isPresent()) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Email already exists");
+        }
+
+        // Tạo user mới
+        User user = new User(
+                req.email(),
+                encoder.encode(req.password()), // Mã hóa mật khẩu trước khi lưu
+                "MERCHANT" // Vai trò mặc định
+        );
+
+        users.save(user);
+
+        return new AuthReponse(user.getId());
+    }
+}
+```
+
+## @Transactional là gì?
+
+Nó bao method (hoặc cả class) trong một giao dịch DB:
+* Vào method ⇒ bắt đầu transaction
+* Ra method ⇒ commit nếu không lỗi, rollback nếu có lỗi (mặc định rollback cho RuntimeException/Error)
+
+Với JPA/Hibernate, trong cùng transaction bạn có một persistence context, các thao tác save()/flush()… được commit cùng nhau.
+
+**Lưu ý quan trọng (hay bị “dính bẫy”)**
+
+* @Transactional hoạt động qua proxy của Spring:
+
+    → Chỉ hiệu lực khi gọi từ bên ngoài bean vào public method đã annotate.
+    
+    → Self-invocation (một method trong cùng class gọi method khác có @Transactional) sẽ không kích hoạt transaction mới.
+    
+    Cách né: để controller gọi thẳng method cần @Transactional, hoặc tách logic sang service khác nếu cần ranh giới giao dịch riêng.
+
+* Repository của Spring Data đã có @Transactional mặc định cho nhiều method; bạn vẫn nên đặt ở service để bao gộp nhiều thao tác thành một transaction.
+
+## Test
+* Request 1:
+```http request
+POST http://localhost:8080/v1/auth/register
+Content-Type: application/json
+
+{
+"email": "relieq@gmail.com",
+"password": "hahaha123"
+}
+```
+
+* Response chạy lần 1:
+```json
+{
+  "userId": 1
+}
+```
+
+* Database change:
+![DB_change_register.png](images/DB_change_register.png)
+
+* Response chạy lần 2 (trùng email):
+```json
+{
+  "timestamp": "2025-09-02T14:00:42.323+00:00",
+  "status": 409,
+  "error": "Conflict",
+  "path": "/v1/auth/register"
+}
+```
 
 ---
