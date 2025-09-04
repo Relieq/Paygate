@@ -390,7 +390,7 @@ public class SecurityBeans {
 **DTO** (tôi đặt trong package dto.auth):
 * Request:
 ```java
-public record RegisterRequest(
+public record AuthRequest(
         @Email @NotBlank String email,
         @NotBlank String password
 ) {}
@@ -414,7 +414,7 @@ public class AuthController {
 
     @PostMapping("/register")
     @ResponseStatus(HttpStatus.CREATED)
-    public AuthReponse register(@Valid @RequestBody RegisterRequest req) {
+    public AuthReponse register(@Valid @RequestBody AuthRequest req) {
         return authService.register(req);
     }
 }
@@ -448,7 +448,7 @@ public class AuthService {
         this.encoder = encoder;
     }
 
-    public AuthReponse register(RegisterRequest req) {
+    public AuthReponse register(AuthRequest req) {
         // Check mail trùng lặp
         if (users.findByEmail(req.email()).isPresent()) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Email already exists");
@@ -520,4 +520,206 @@ Content-Type: application/json
 }
 ```
 
+* Mọi người có thể thử chạy email sai định dạng, password trống, nó sẽ trả 400 Bad Request vì vi phạm @Email, @NotBlank.
+
 ---
+# Bài 3: Login + phát JWT (HS256)
+**Mục tiêu**
+* Tự tìm hiểu về JWT (JSON Web Token) - "vé đã ký".
+* Làm endpoint POST /v1/auth/login trả token.
+
+**Khái niệm**
+* HS256: ký và xác minh bằng cùng 1 secret (để demo nhanh).
+* Claims tối thiểu: sub (subject - userId), email, roles, iat (issued at - thời điểm token được phát hành), exp (hạn dùng), 
+iss (issuer - ai phát hành).
+* Bearer token: sau khi được phát JWT, client gửi trong header Authorization: Bearer <token>.
+
+## JWT
+JSON Web Token (JWT) là một tiêu chuẩn mở (RFC 7519) dùng để truyền thông tin an toàn giữa các bên dưới dạng một đối tượng JSON.
+JWT thường được sử dụng trong các hệ thống xác thực và ủy quyền, đặc biệt là trong các ứng dụng web và dịch vụ RESTful.
+Một JWT bao gồm ba phần chính, được phân tách bằng dấu chấm (.):
+1. Header (Tiêu đề):
+   - Chứa thông tin về loại token và thuật toán ký.
+   - Ví dụ:
+   ```json
+   {
+     "alg": "HS256",
+     "typ": "JWT"
+   }
+   ```
+2. Payload (Nội dung):
+    - Chứa các thông tin (claims) mà bạn muốn truyền tải.
+    - Có ba loại claims:
+      - Registered claims: các trường chuẩn như iss (issuer), sub (subject), aud (audience), exp (expiration time), nbf (not before), iat (issued at), jti (JWT ID).
+      - Public claims: các trường do người dùng định nghĩa, nhưng nên tránh trùng lặp tên.
+      - Private claims: các trường do hai bên thỏa thuận sử dụng.
+      - Ví dụ:
+   ```json
+   {
+     "sub": "1234567890",
+     "name": "John Doe",
+     "admin": true,
+     "iat": 1516239022
+   }
+   ```
+   3. Signature (Chữ ký):
+      - Được tạo bằng cách lấy header và payload, mã hóa chúng bằng Base64Url, sau đó ký bằng thuật toán đã chỉ định trong header (ví dụ: HMAC SHA256) cùng với một secret key.
+      - Ví dụ:
+      ```HMACSHA256(
+        base64UrlEncode(header) + "." +
+        base64UrlEncode(payload),
+        secret)
+      ```
+**Lưu ý quan trọng**
+* JWT không mã hoá (không bí mật), chỉ ký để đảm bảo tính toàn vẹn, không thể sửa đổi mà không biết secret.
+* Không dùng JWT để lưu thông tin nhạy cảm.
+* Chọn thuật toán ký phù hợp (HS256, RS256).
+* Quản lý vòng đời token (hạn dùng, làm mới, thu hồi).
+
+**jwt.serialize() là gì?**
+* Trước serialize ("dạng đầu"): JWT là một object nội bộ (trong Nimbus là SignedJWT), với header/payload là JSON objects, signature là bytes. Các phần này chưa encode, dễ đọc và chỉnh sửa trong code.
+* Sau serialize ("dạng sau"): Các phần được encode Base64URL (một biến thể Base64 an toàn cho URL, không có = padding), rồi nối bằng dấu chấm (.). Kết quả là string compact, dễ truyền (qua header HTTP, URL), nhưng không đọc được trực tiếp (phải decode để xem nội dung).
+* Quá trình serialize (trong Nimbus jwt.serialize()):
+
+    * Encode header JSON → Base64URL.
+    * Encode payload (claims) JSON → Base64URL.
+    * Encode signature bytes → Base64URL.
+    * Nối: header_base64 + "." + payload_base64 + "." + signature_base64.
+
+---
+**Bước làm**
+1) Thêm thư viện JWT: Dùng Nimbus JOSE JWT (gọn, phổ biến).
+2) Cấu hình secret & TTL (Time To Live của token) trong application.properties:
+```properties
+app.jwt.secret=${JWT_SECRET:change-me-32chars-min}
+app.jwt.issuer=paygate-lite
+app.jwt.ttl=60
+```
+Các bạn có thể vào trang sau để tạo secret an toàn: https://jwtsecretkeygenerator.com/
+3) POST /v1/auth/login
+* Request DTO: dùng AuthRequest (email, password) của bài trước.
+* Response DTO:
+```java
+public record TokenResponse(String accessToken, long expiresAtEpochSec) {}
+```
+
+4) AuthController thêm endpoint /login:
+```java
+@PostMapping("/login")
+@ResponseStatus(HttpStatus.OK)
+public TokenResponse login(@Valid @RequestBody AuthRequest req) {
+    return authService.login(req);
+}
+```
+
+4) Thêm 2 method login và issueToken trong AuthService:
+```java
+@Transactional(readOnly = true)
+public TokenResponse login(AuthRequest req) {
+    User user = users.findByEmail(req.email()).orElseThrow(() ->
+            new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid email or password")
+    );
+
+    // Kiểm tra mật khẩu
+    if (!encoder.matches(req.password(), user.getPasswordHash())) {
+        throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid email or password");
+    }
+
+    var roles = Arrays.asList(user.getRole().split(","));
+    var token = issueToken(user.getId().toString(), user.getEmail(), roles);
+    var exp = jwt.expiresAtFromNow().getEpochSecond();
+
+    return new TokenResponse(token, exp);
+}
+
+private String issueToken(String userId, String email, java.util.List<String> roles) {
+    try {
+        return jwt.issue(userId, email, roles);
+    } catch (Exception e) {
+        throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Cannot issue token");
+    }
+}
+```
+
+5) Tạo JwtTokenProvider:
+```java
+@Component
+public class JwtTokenProvider {
+    private final byte[] key;
+    private final String issuer;
+    private final Duration ttl;
+
+    public JwtTokenProvider(
+            @Value("${app.jwt.secret}") String secret,
+            @Value("${app.jwt.issuer}") String issuer,
+            @Value("${app.jwt.ttl-minutes}") long ttlMinutes
+    ) {
+        this.key = secret.getBytes(StandardCharsets.UTF_8);
+        this.issuer = issuer;
+        this.ttl = Duration.ofMinutes(ttlMinutes);
+    }
+
+    public String issue(String userId, String email, List<String> roles) throws JOSEException {
+        Instant now = Instant.now();
+        Instant exp = now.plus(ttl);
+
+        // Payload: claims
+        JWTClaimsSet claims = new JWTClaimsSet.Builder()
+                .issuer(issuer)
+                .issueTime(Date.from(now))
+                .expirationTime(Date.from(exp))
+                .subject(userId)
+                .claim("email", email)
+                .claim("roles", roles)
+                .build();
+
+        SignedJWT jwt = new SignedJWT(new JWSHeader(JWSAlgorithm.HS256), claims); // Chưa tạo sign
+        jwt.sign(new MACSigner(key)); // Sign the JWT with the secret key but not encrypt
+        return jwt.serialize(); // serialize to compact form (encrypt, ready to be used as a token
+    }
+
+    public Instant expiresAtFromNow() {
+        return Instant.now().plus(ttl);
+    }
+}
+```
+
+## Test
+* Request:
+```http request
+POST http://localhost:8080/v1/auth/login
+Content-Type: application/json
+
+{
+  "email": "relieq@gmail.com",
+  "password": "hahaha123"
+}
+```
+* Response:
+```json
+{
+  "accessToken": "<HEADER>.<PAYLOAD>.<SIGNATURE>",
+  "expiresAtEpochSec": 1756959603
+}
+```
+Các bạn có thể decode token trên https://jwt.io/ để xem nội dung bên trong.
+![Decode JWT.jpeg](images/Decode%20JWT.jpeg)
+
+## Chú ý:
+1) “base64” là gì? Có dùng không?
+   * Base64 chỉ là cách mã hoá chữ/binary sang ký tự để truyền cho gọn, không phải mã hoá an toàn.
+   
+   * Trong code của mình, bạn đang làm:
+    `new MACSigner(secret.getBytes(StandardCharsets.UTF_8))`
+
+        ⇒ Nghĩa là dùng chính chuỗi secret “thô” (UTF-8), không decode Base64.
+    
+        ➜ Trên jwt.io cũng để UTF-8, đừng bật chế độ Base64.
+
+2) “64 bits” vs “32 bytes” (dễ nhầm)
+    * HS256 yêu cầu tối thiểu 256-bit = 32 byte ~ ≥32 ký tự (nếu dùng ASCII/UTF-8 đơn giản).
+    * “64 bits” = 8 byte → quá ngắn.
+    * Nếu bạn bảo “64 ký tự” thì OK (≈ 64 byte).
+    * Token của bạn đã phát được → secret hiện tại đủ dài; vấn đề là bạn đang nhập không đúng secret khi verify.
+---
+

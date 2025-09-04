@@ -1,4 +1,4 @@
-package com.example.paygate.config;
+package com.example.paygate.security;
 
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;

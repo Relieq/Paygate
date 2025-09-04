@@ -1,7 +1,8 @@
 package com.example.paygate.controller;
 
-import com.example.paygate.dto.auth.AuthReponse;
-import com.example.paygate.dto.auth.RegisterRequest;
+import com.example.paygate.dto.auth.AuthResponse;
+import com.example.paygate.dto.auth.AuthRequest;
+import com.example.paygate.dto.auth.TokenResponse;
 import com.example.paygate.service.AuthService;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
@@ -18,7 +19,13 @@ public class AuthController {
 
     @PostMapping("/register")
     @ResponseStatus(HttpStatus.CREATED)
-    public AuthReponse register(@Valid @RequestBody RegisterRequest req) {
+    public AuthResponse register(@Valid @RequestBody AuthRequest req) {
         return authService.register(req);
+    }
+
+    @PostMapping("/login")
+    @ResponseStatus(HttpStatus.OK)
+    public TokenResponse login(@Valid @RequestBody AuthRequest req) {
+        return authService.login(req);
     }
 }

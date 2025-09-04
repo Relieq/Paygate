@@ -1,5 +1,5 @@
 // Tạo file này theo hướng dẫn của ChatGPT để ứng phó tạm với Spring Security đã. Sẽ sửa đổi sau.
-package com.example.paygate.config;
+package com.example.paygate.security.config;
 
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
