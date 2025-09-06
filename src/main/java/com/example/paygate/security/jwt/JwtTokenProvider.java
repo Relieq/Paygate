@@ -4,12 +4,15 @@ import com.nimbusds.jose.JOSEException;
 import com.nimbusds.jose.JWSAlgorithm;
 import com.nimbusds.jose.JWSHeader;
 import com.nimbusds.jose.crypto.MACSigner;
+import com.nimbusds.jose.crypto.MACVerifier;
+import com.nimbusds.jose.proc.BadJOSEException;
 import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.nio.charset.StandardCharsets;
+import java.text.ParseException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Date;
@@ -52,5 +55,24 @@ public class JwtTokenProvider {
 
     public Instant expiresAtFromNow() {
         return Instant.now().plus(ttl);
+    }
+
+    public JWTClaimsSet verify(String token)
+            throws JOSEException, ParseException, BadJOSEException {
+        SignedJWT jwt = SignedJWT.parse(token);
+        boolean ok = jwt.verify(new MACVerifier(key));
+
+        if (!ok) {
+            throw new BadJOSEException("Invalid signature");
+        }
+
+        JWTClaimsSet claims = jwt.getJWTClaimsSet();
+        Date exp = claims.getExpirationTime();
+
+        if (exp == null || exp.before(new Date())) {
+            throw new BadJOSEException("Expired");
+        }
+
+        return claims;
     }
 }

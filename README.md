@@ -19,6 +19,18 @@ API mô phỏng một gateway thẻ cơ bản (học thuật, không dùng sản
 * Unit test và Stress test.
 
 ---
+## Nội dung học tập
+* Bài 1: “Hello Spring Boot”
+* Bài 2: MySQL + JPA + Register (không JWT)
+* Bài 3: Login + phát JWT (HS256)
+* Bài 4: Spring Security bảo vệ API bằng JWT
+* Bài 5: Payment create (+ Idempotency-Key)
+* Bài 6: Refund / Void (+ kiểm soát trạng thái)
+* Bài 7: Validation & Exception JSON chuẩn, log an toàn
+* Bài 8: Actuator (health/metrics) → Prometheus/Grafana (khởi động)
+* Bài 9: Unit test trọng tâm JWT/Auth/Payments, và stress test k6
+
+---
 
 # Bài 1: “Hello Spring Boot” 
 (Bài này ban đầu làm bên project khác, giờ gom vào đây cho đủ bộ)
@@ -596,6 +608,7 @@ app.jwt.issuer=paygate-lite
 app.jwt.ttl=60
 ```
 Các bạn có thể vào trang sau để tạo secret an toàn: https://jwtsecretkeygenerator.com/
+
 3) POST /v1/auth/login
 * Request DTO: dùng AuthRequest (email, password) của bài trước.
 * Response DTO:
@@ -722,4 +735,225 @@ Các bạn có thể decode token trên https://jwt.io/ để xem nội dung bê
     * Nếu bạn bảo “64 ký tự” thì OK (≈ 64 byte).
     * Token của bạn đã phát được → secret hiện tại đủ dài; vấn đề là bạn đang nhập không đúng secret khi verify.
 ---
+# Bài 4: Bảo vệ API bằng Spring Security + JWT
+**Mục tiêu**
+1. Bổ sung hàm verify() vào JwtTokenProvider để kiểm tra chữ ký + hạn dùng.
+2. Tạo JwtAuthFilter đọc header, verify token, gắn Authentication vào SecurityContext.
+3. Sửa SecurityConfig (lúc trước bỏ tạm để truy cập tự do): chỉ register/login/health là permitAll, còn lại authenticated; 
+ví dụ ràng buộc role cho /v1/payments/**.
 
+**Các bước làm**
+1) Thêm hàm verify() trong JwtTokenProvider:
+* Phải check exp vì thư viện không tự check
+```java
+public JWTClaimsSet verify(String token) 
+        throws JOSEException, ParseException, BadJOSEException {
+    SignedJWT jwt = SignedJWT.parse(token);
+    boolean ok = jwt.verify(new MACVerifier(key));
+    
+    if (!ok) {
+        throw new BadJOSEException("Invalid signature");
+    }
+    
+    JWTClaimsSet claims = jwt.getJWTClaimsSet();
+    Date exp = claims.getExpirationTime();
+    
+    if (exp == null || exp.before(new Date())) {
+        throw new BadJOSEException("Expired");
+    }
+    
+    return claims;
+}
+```
+
+---
+## Bức tranh lớn: Servlet & Filter trong Spring Security
+* Servlet: "cái lõi" Java web xưa nay. Mỗi HTTP request vào server được gói thành HttpServletRequest, câu trả lời là 
+HttpServletResponse.
+* Filter: "chốt chặn" chạy trước và/hoặc sau servlet/controller tùy vào cách bạn viết code trong method doFilter() của 
+filter. Đây là cơ chế linh hoạt để xử lý pre-processing (trước) và post-processing (sau).
+    * Trước (pre-processing): Code viết trước dòng chain.doFilter(req, res) sẽ chạy trước khi request pass đến filter/Servlet 
+  tiếp theo. Ví dụ: Check header, auth token, log request.
+    * Sau (post-processing): Code viết sau dòng chain.doFilter(req, res) sẽ chạy sau khi Servlet/filter tiếp theo xử lý 
+  xong (response quay về). Ví dụ: Modify response header, log thời gian xử lý, compress output.
+
+**SecurityContextHolder**:
+* "Ngăn kéo" (ThreadLocal) chứa SecurityContext hiện tại của request.
+* Filter của chúng ta đặt Authentication vào đây -> về sau controller/service có thể lấy ra.
+
+**Pipeline cơ bản trong code chúng ta**
+```
+Client → Servlet Container (Tomcat) → Filter Chain (bao gồm JwtAuthFilter) 
+→ DispatcherServlet (Spring's central servlet) - route req đến Controller phù hợp (dựa @RequestMapping) 
+→ Controller/Handler → Response quay ngược Filter Chain → Client.
+```
+
+Spring Security dựng một chuỗi Filter (Filter Chain) để làm mọi việc bảo mật (xác thực, phân quyền, CSRF, CORS, v.v.). 
+JwtAuthFilter của chúng ta là một mắt xích trong chuỗi đó.
+
+2) Tạo JwtAuthFilter (extends OncePerRequestFilter):
+
+**OncePerRequestFilter**:
+* Là lớp tiện ích của Spring: đảm bảo mỗi request chỉ chạy filter 1 lần (tránh lặp lại khi forward/async - cái này tôi cũng
+không rõ lắm, chỉ là tấy định nghĩa vậy, sẽ tìm hiểu sau).
+* Chúng ta sẽ kế thừa và override method doFilterInternal() để viết logic của mình.
+
+**Về method doFilterInternal()**:
+* Đây là hàm chính của filter, nơi bạn viết code để xử lý request.
+* Tham số:
+    * HttpServletRequest req
+    * HttpServletResponse res
+    * FilterChain chain: gọi chain.doFilter(req, res) để chuyển tiếp sang filter kế / controller. Nếu không gọi, request 
+  sẽ kết thúc tại đây - filter đó phải tự xử lý response (ví dụ: gửi error, redirect, hoặc write body trực tiếp), nếu 
+  không client sẽ không nhận được response hợp lệ (có thể dẫn đến timeout hoặc empty response).
+* Chúng ta cũng phải throws ServletException, IOException vì API Servlet yêu cầu - đây là khuôn mẫu tiêu chuẩn 
+(I/O hoặc xử lý servlet có thể lỗi).
+```java
+public class JwtAuthFilter extends OncePerRequestFilter {
+    private final JwtTokenProvider jwt;
+
+    public JwtAuthFilter(JwtTokenProvider jwt) {
+        this.jwt = jwt;
+    }
+
+    @Override
+    protected void doFilterInternal(HttpServletRequest req, HttpServletResponse res, FilterChain chain)
+            throws ServletException, IOException
+    {
+        String header = req.getHeader("Authorization");
+        if (header == null || !header.startsWith("Bearer ")) {
+            chain.doFilter(req, res); // Để quy tắc của HTTP tiếp tục xử lý
+            return;
+        }
+
+        String token = header.substring(7);
+        try {
+            // Xác thực signature và thời hạn token
+            JWTClaimsSet claims = jwt.verify(token);
+
+            // Lọc dựa trên quyền truy cập
+            @SuppressWarnings("Unchecked")
+            List<String> roles = (List<String>) Objects.requireNonNullElse(claims.getClaim("roles"), List.of());
+            //Check non-null để ép kiểu an toàn
+
+            // Tạo tập các quyền (authorities) từ roles
+            var authorities = roles.stream()
+                    .map(role -> "ROLE_" + role)
+                    .map(SimpleGrantedAuthority::new)
+                    .toList();
+
+            var authentication = new UsernamePasswordAuthenticationToken(
+                    claims.getSubject(),
+                    null,
+                    authorities
+            );
+
+            // Đặt thông tin xác thực vào SecurityContext
+            SecurityContextHolder.getContext().setAuthentication(authentication);
+            chain.doFilter(req, res); // Tiếp tục xử lý
+        } catch (Exception e) {
+            res.sendError(HttpServletResponse.SC_UNAUTHORIZED, "Invalid or expired token"); // 401
+        }
+    }
+}
+```
+
+**@SuppressWarnings("Unchecked")**:
+* claims.getClaim("roles") trả về Object (thư viện JWT không biết kiểu cụ thể), chúng ta thì ép về List<String>.
+* Java sẽ cảnh báo "unchecked cast" vì không thể kiểm tra kiểu lúc runtime (do type erasure) -> dùng annotation này để 
+tắt cảnh báo.
+* Chú ý: chỉ suppress khi bạn chắc kiểu dữ liệu vì chính chúng ta tạo claims lúc phát token.
+
+**UsernamePasswordAuthenticationToken**:
+* Đây là 1 Authentication implementation của Spring Security.
+* Chúng ta tạo nó để đại diện người dùng đã xác thực:
+  * principal: ai? (ở đây là sub - userId dạng String)
+  * credentials: mật khẩu (ở đây null vì không cần nữa)
+  * authorities: quyền (role) của user.
+* Sau đó đặt vào SecurityContextHolder để Spring Security biết người dùng đã xác thực.
+
+**SimpleGrantedAuthority**:
+* Bao một chuỗi quyền (ví dụ ROLE_MERCHANT).
+* Spring dùng các GrantedAuthority để kiểm tra hasRole/hasAuthority trong phân quyền.
+* Quy ước: hasRole("MERCHANT") sẽ khớp với authority "ROLE_MERCHANT" (Spring tự thêm tiền tố "ROLE_" trong check).
+
+* Tổng quan lại hàm JwtAuthFilter làm những chuyện sau:
+    1. Đọc header Authorization.
+    2. Nếu không có hoặc không đúng định dạng Bearer, bỏ qua (chain.doFilter).
+    3. Nếu có, lấy token, gọi jwt.verify(token) - kiểm tra chữ ký + hạn dùng.
+    4. Nếu verify OK, lấy claims, rồi đặt người dùng vào SecurityContextHolder bằng UsernamePasswordAuthenticationToken 
+  với SimpleGrantedAuthority từ roles.
+    5. Cuối cùng gọi chain.doFilter để tiếp tục xử lý request.
+    Trong quá trình trên nếu lỗi thiếu  chữ ký, hết hạn,... -> 401
+
+_Lưu ý:_
+- Không tự trả 401 khi thiếu header → để rule HTTP xử lý (giúp /v1/auth/login, /register vẫn vào được).
+- Khi verify OK → đặt Authentication (principal = sub, authorities từ roles).
+
+3) Cập nhật SecurityConfig:
+
+Lúc trước chúng ta để tạm thời bỏ chặn (permitAll) để dễ test register/login (trước đó tôi không nói phần này). Bây giờ 
+chúng ta sẽ sửa lại để bảo vệ API.
+
+**SecurityConfig làm gì?**
+* Nó nói với Spring Security API này là REST stateless dùng JWT, không dùng form login mặc định; những đường dẫn nào được 
+tự do, những đường dẫn nào cần token, và cách lấy user/role từ token.
+* @EnableWebSecurity: bật Web Security (đăng ký filter chain). Trong Boot 3, nhiều thứ auto-config sẵn nhờ spring-boot-starter-security 
+nhưng gắn annotation này là cách "rõ ý đồ" (trên mạng bảo vậy :))
+* Đây là bean SecurityFilterChain, Spring Security sẽ tự nhặt bean này inject vào springSecurityFilterChain (filter gốc), 
+nên mọi request đều đi qua chuỗi filter chúng ta đã cấu hình.
+* csrf(csrf -> csrf.disable()): sinh ra để bảo vệ form POST của web truyền thống (luu session, cookie) khỏi tấn công CSRF. 
+Nhưng vì API của chúng ta là REST stateless + Bearer token nên không cần (tắt để tránh lỗi khi POST/PUT mà không có CSRF token).
+* sessionManagement(sm -> sm.sessionCreationPolicy(SessionCreationPolicy.STATELESS)): không tạo, giữ session trên server.
+* formLogin(form -> form.disable()): tắt trang /login mặc định của Spring Security, hiện tại chúng ta đăng nhập bằng JSON 
+tại /v1/auth/login.
+* httpBasic(basic -> basic.disable()): tắt Basic Auth (popup user/pass của trình duyệt), chung ta dùng Bearer JWT.
+* authorizeHttpRequests(...): đây là bộ luật vào cửa theo đường dẫn. Thứ tự từ trên xuống rất quan trọng, matcher nào khớp 
+trước sẽ quyết định.
+* addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class): nhét filter JWT chúng ta custom vào chuỗi 
+filter trước filter đăng nhập username/password của Spring. JwtAuthFilter sẽ:
+  * Đọc header Authorization: Bearer <token>
+  * Verify token
+  * Nếu OK, đặt Authentication (user + roles) vào SecurityContextHolder => Sau bước này, các rule hasRole, authenticated()
+  mới hoạt động.
+* build(): hoàn tất cấu hình, trả về SecurityFilterChain cho Spring sử dụng.
+
+## Test nhanh
+* Lúc chưa đăng nhập, chạy request sau:
+```hhtp request
+GET http://localhost:8080/v1/payments/123
+```
+
+cho ra response:
+```json
+{
+  "timestamp": "2025-09-06T03:48:53.139+00:00",
+  "status": 403,
+  "error": "Forbidden",
+  "path": "/v1/payments/123"
+}
+```
+
+* Việc chưa có controller /v1/payments/123 không quan trọng, nếu chúng ta gửi token hợp lệ, request sẽ qua được Security rồi 
+mới đến MVC và... báo 404 Not Found (vì chưa có endpoint). Tức là:
+    * Không có token ~~->~~ chặn ở Security ~~->~~ 403 (cái này thực ra không đúng lắm, theo tìm hiểu thì đây là lỗi thiếu quyền 
+  chứ nó còn chưa xét đến token, đúng ra phải là 401, để đơn giản thì ở project này tôi để vậy).
+    * Có token hợp lệ (có role MERCHANT/ADMIN) ~~->~~ qua Security ~~->~~ đến MVC ~~->~~ 404 (chưa có API).
+
+* Request sau khi đăng nhập (thay <token> bằng token thật):
+```http request
+GET http://localhost:8080/v1/payments/123
+Authorization: Bearer <token>
+```
+
+cho ra response:
+```json
+{
+  "timestamp": "2025-09-06T04:41:02.870+00:00",
+  "status": 404,
+  "error": "Not Found",
+  "path": "/v1/payments/123"
+}
+```
+
+---
